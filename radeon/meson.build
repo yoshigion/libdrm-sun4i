@@ -28,7 +28,7 @@ libdrm_radeon = shared_library(
     ),
     config_file,
   ],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   include_directories : [inc_root, inc_drm],
   link_with : libdrm,
   dependencies : [dep_pthread_stubs, dep_atomic_ops],
@@ -57,8 +57,11 @@ pkg.generate(
 )
 
 test(
-  'radeon-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('radeon-symbol-check'), libdrm_radeon]
+  'radeon-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_radeon,
+    '--symbols-file', files('radeon-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

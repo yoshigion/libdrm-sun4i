@@ -26,13 +26,12 @@ libdrm_amdgpu = shared_library(
   [
     files(
       'amdgpu_asic_id.c', 'amdgpu_bo.c', 'amdgpu_cs.c', 'amdgpu_device.c',
-      'amdgpu_gpu_info.c', 'amdgpu_vamgr.c', 'amdgpu_vm.c', 'util_hash.c',
-      'util_hash_table.c',
+      'amdgpu_gpu_info.c', 'amdgpu_vamgr.c', 'amdgpu_vm.c', 'handle_table.c',
     ),
     config_file,
   ],
   c_args : [
-    warn_c_args,
+    libdrm_c_args,
     '-DAMDGPU_ASIC_ID_TABLE="@0@"'.format(join_paths(datadir_amdgpu, 'amdgpu.ids')),
   ],
   include_directories : [inc_root, inc_drm],
@@ -59,8 +58,11 @@ ext_libdrm_amdgpu = declare_dependency(
 )
 
 test(
-  'amdgpu-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('amdgpu-symbol-check'), libdrm_amdgpu]
+  'amdgpu-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_amdgpu,
+    '--symbols-file', files('amdgpu-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

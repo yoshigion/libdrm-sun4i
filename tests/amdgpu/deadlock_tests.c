@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#ifdef HAVE_ALLOCA_H
+#if HAVE_ALLOCA_H
 # include <alloca.h>
 #endif
 
@@ -73,6 +73,32 @@
 		 * 1 - pfp
 		 */
 
+#define	PACKET3_WRITE_DATA				0x37
+#define		WRITE_DATA_DST_SEL(x)                   ((x) << 8)
+		/* 0 - register
+		 * 1 - memory (sync - via GRBM)
+		 * 2 - gl2
+		 * 3 - gds
+		 * 4 - reserved
+		 * 5 - memory (async - direct)
+		 */
+#define		WR_ONE_ADDR                             (1 << 16)
+#define		WR_CONFIRM                              (1 << 20)
+#define		WRITE_DATA_CACHE_POLICY(x)              ((x) << 25)
+		/* 0 - LRU
+		 * 1 - Stream
+		 */
+#define		WRITE_DATA_ENGINE_SEL(x)                ((x) << 30)
+		/* 0 - me
+		 * 1 - pfp
+		 * 2 - ce
+		 */
+
+#define mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR                                      0x54f
+
+#define SDMA_PKT_HEADER_OP(x)	(x & 0xff)
+#define SDMA_OP_POLL_REGMEM  8
+
 static  amdgpu_device_handle device_handle;
 static  uint32_t  major_version;
 static  uint32_t  minor_version;
@@ -80,9 +106,20 @@ static  uint32_t  minor_version;
 static pthread_t stress_thread;
 static uint32_t *ptr;
 
+int use_uc_mtype = 0;
+
 static void amdgpu_deadlock_helper(unsigned ip_type);
 static void amdgpu_deadlock_gfx(void);
 static void amdgpu_deadlock_compute(void);
+static void amdgpu_illegal_reg_access();
+static void amdgpu_illegal_mem_access();
+static void amdgpu_deadlock_sdma(void);
+static void amdgpu_dispatch_hang_gfx(void);
+static void amdgpu_dispatch_hang_compute(void);
+static void amdgpu_dispatch_hang_slow_gfx(void);
+static void amdgpu_dispatch_hang_slow_compute(void);
+static void amdgpu_draw_hang_gfx(void);
+static void amdgpu_draw_hang_slow_gfx(void);
 
 CU_BOOL suite_deadlock_tests_enable(void)
 {
@@ -92,11 +129,19 @@ CU_BOOL suite_deadlock_tests_enable(void)
 					     &minor_version, &device_handle))
 		return CU_FALSE;
 
-	if (device_handle->info.family_id == AMDGPU_FAMILY_AI ||
-	    device_handle->info.family_id == AMDGPU_FAMILY_SI) {
-		printf("\n\nCurrently hangs the CP on this ASIC, deadlock suite disabled\n");
+	/*
+	 * Only enable for ASICs supporting GPU reset and for which it's enabled
+	 * by default (currently GFX8/9 dGPUS)
+	 */
+	if (device_handle->info.family_id != AMDGPU_FAMILY_VI &&
+	    device_handle->info.family_id != AMDGPU_FAMILY_AI &&
+	    device_handle->info.family_id != AMDGPU_FAMILY_CI) {
+		printf("\n\nGPU reset is not enabled for the ASIC, deadlock suite disabled\n");
 		enable = CU_FALSE;
 	}
+
+	if (device_handle->info.family_id >= AMDGPU_FAMILY_AI)
+		use_uc_mtype = 1;
 
 	if (amdgpu_device_deinitialize(device_handle))
 		return CU_FALSE;
@@ -134,8 +179,17 @@ int suite_deadlock_tests_clean(void)
 
 
 CU_TestInfo deadlock_tests[] = {
-	{ "gfx ring block test",  amdgpu_deadlock_gfx },
-	{ "compute ring block test",  amdgpu_deadlock_compute },
+	{ "gfx ring block test (set amdgpu.lockup_timeout=50)", amdgpu_deadlock_gfx },
+	{ "compute ring block test (set amdgpu.lockup_timeout=50)", amdgpu_deadlock_compute },
+	{ "sdma ring block test (set amdgpu.lockup_timeout=50)", amdgpu_deadlock_sdma },
+	{ "illegal reg access test", amdgpu_illegal_reg_access },
+	{ "illegal mem access test (set amdgpu.vm_fault_stop=2)", amdgpu_illegal_mem_access },
+	{ "gfx ring bad dispatch test (set amdgpu.lockup_timeout=50)", amdgpu_dispatch_hang_gfx },
+	{ "compute ring bad dispatch test (set amdgpu.lockup_timeout=50,50)", amdgpu_dispatch_hang_compute },
+	{ "gfx ring bad slow dispatch test (set amdgpu.lockup_timeout=50)", amdgpu_dispatch_hang_slow_gfx },
+	{ "compute ring bad slow dispatch test (set amdgpu.lockup_timeout=50,50)", amdgpu_dispatch_hang_slow_compute },
+	{ "gfx ring bad draw test (set amdgpu.lockup_timeout=50)", amdgpu_draw_hang_gfx },
+	{ "gfx ring slow bad draw test (set amdgpu.lockup_timeout=50)", amdgpu_draw_hang_slow_gfx },
 	CU_TEST_INFO_NULL,
 };
 
@@ -182,8 +236,8 @@ static void amdgpu_deadlock_helper(unsigned ip_type)
 	r = amdgpu_cs_ctx_create(device_handle, &context_handle);
 	CU_ASSERT_EQUAL(r, 0);
 
-	r = amdgpu_bo_alloc_and_map(device_handle, 4096, 4096,
-			AMDGPU_GEM_DOMAIN_GTT, 0,
+	r = amdgpu_bo_alloc_and_map_raw(device_handle, 4096, 4096,
+			AMDGPU_GEM_DOMAIN_GTT, 0, use_uc_mtype ? AMDGPU_VM_MTYPE_UC : 0,
 						    &ib_result_handle, &ib_result_cpu,
 						    &ib_result_mc_address, &va_handle);
 	CU_ASSERT_EQUAL(r, 0);
@@ -223,7 +277,6 @@ static void amdgpu_deadlock_helper(unsigned ip_type)
 	ibs_request.ibs = &ib_info;
 	ibs_request.resources = bo_list;
 	ibs_request.fence_info.handle = NULL;
-
 	for (i = 0; i < 200; i++) {
 		r = amdgpu_cs_submit(context_handle, 0,&ibs_request, 1);
 		CU_ASSERT_EQUAL((r == 0 || r == -ECANCELED), 1);
@@ -252,4 +305,242 @@ static void amdgpu_deadlock_helper(unsigned ip_type)
 
 	r = amdgpu_cs_ctx_free(context_handle);
 	CU_ASSERT_EQUAL(r, 0);
+}
+
+static void amdgpu_deadlock_sdma(void)
+{
+	amdgpu_context_handle context_handle;
+	amdgpu_bo_handle ib_result_handle;
+	void *ib_result_cpu;
+	uint64_t ib_result_mc_address;
+	struct amdgpu_cs_request ibs_request;
+	struct amdgpu_cs_ib_info ib_info;
+	struct amdgpu_cs_fence fence_status;
+	uint32_t expired;
+	int i, r;
+	amdgpu_bo_list_handle bo_list;
+	amdgpu_va_handle va_handle;
+	struct drm_amdgpu_info_hw_ip info;
+	uint32_t ring_id;
+
+	r = amdgpu_query_hw_ip_info(device_handle, AMDGPU_HW_IP_DMA, 0, &info);
+	CU_ASSERT_EQUAL(r, 0);
+
+	r = amdgpu_cs_ctx_create(device_handle, &context_handle);
+	CU_ASSERT_EQUAL(r, 0);
+
+	for (ring_id = 0; (1 << ring_id) & info.available_rings; ring_id++) {
+		r = pthread_create(&stress_thread, NULL, write_mem_address, NULL);
+		CU_ASSERT_EQUAL(r, 0);
+
+		r = amdgpu_bo_alloc_and_map_raw(device_handle, 4096, 4096,
+				AMDGPU_GEM_DOMAIN_GTT, 0, use_uc_mtype ? AMDGPU_VM_MTYPE_UC : 0,
+							    &ib_result_handle, &ib_result_cpu,
+							    &ib_result_mc_address, &va_handle);
+		CU_ASSERT_EQUAL(r, 0);
+
+		r = amdgpu_get_bo_list(device_handle, ib_result_handle, NULL,
+				       &bo_list);
+		CU_ASSERT_EQUAL(r, 0);
+
+		ptr = ib_result_cpu;
+		i = 0;
+
+		ptr[i++] = SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) |
+				(0 << 26) | /* WAIT_REG_MEM */
+				(4 << 28) | /* != */
+				(1 << 31); /* memory */
+		ptr[i++] = (ib_result_mc_address + 256*4) & 0xfffffffc;
+		ptr[i++] = ((ib_result_mc_address + 256*4) >> 32) & 0xffffffff;
+		ptr[i++] = 0x00000000; /* reference value */
+		ptr[i++] = 0xffffffff; /* and mask */
+		ptr[i++] =  4 | /* poll interval */
+				(0xfff << 16); /* retry count */
+
+		for (; i < 16; i++)
+			ptr[i] = 0;
+
+		ptr[256] = 0x0; /* the memory we wait on to change */
+
+		memset(&ib_info, 0, sizeof(struct amdgpu_cs_ib_info));
+		ib_info.ib_mc_address = ib_result_mc_address;
+		ib_info.size = 16;
+
+		memset(&ibs_request, 0, sizeof(struct amdgpu_cs_request));
+		ibs_request.ip_type = AMDGPU_HW_IP_DMA;
+		ibs_request.ring = ring_id;
+		ibs_request.number_of_ibs = 1;
+		ibs_request.ibs = &ib_info;
+		ibs_request.resources = bo_list;
+		ibs_request.fence_info.handle = NULL;
+
+		for (i = 0; i < 200; i++) {
+			r = amdgpu_cs_submit(context_handle, 0,&ibs_request, 1);
+			CU_ASSERT_EQUAL((r == 0 || r == -ECANCELED), 1);
+
+		}
+
+		memset(&fence_status, 0, sizeof(struct amdgpu_cs_fence));
+		fence_status.context = context_handle;
+		fence_status.ip_type = AMDGPU_HW_IP_DMA;
+		fence_status.ip_instance = 0;
+		fence_status.ring = ring_id;
+		fence_status.fence = ibs_request.seq_no;
+
+		r = amdgpu_cs_query_fence_status(&fence_status,
+				AMDGPU_TIMEOUT_INFINITE,0, &expired);
+		CU_ASSERT_EQUAL((r == 0 || r == -ECANCELED), 1);
+
+		pthread_join(stress_thread, NULL);
+
+		r = amdgpu_bo_list_destroy(bo_list);
+		CU_ASSERT_EQUAL(r, 0);
+
+		r = amdgpu_bo_unmap_and_free(ib_result_handle, va_handle,
+					     ib_result_mc_address, 4096);
+		CU_ASSERT_EQUAL(r, 0);
+	}
+	r = amdgpu_cs_ctx_free(context_handle);
+	CU_ASSERT_EQUAL(r, 0);
+}
+
+static void bad_access_helper(int reg_access)
+{
+	amdgpu_context_handle context_handle;
+	amdgpu_bo_handle ib_result_handle;
+	void *ib_result_cpu;
+	uint64_t ib_result_mc_address;
+	struct amdgpu_cs_request ibs_request;
+	struct amdgpu_cs_ib_info ib_info;
+	struct amdgpu_cs_fence fence_status;
+	uint32_t expired;
+	int i, r;
+	amdgpu_bo_list_handle bo_list;
+	amdgpu_va_handle va_handle;
+
+	r = amdgpu_cs_ctx_create(device_handle, &context_handle);
+	CU_ASSERT_EQUAL(r, 0);
+
+	r = amdgpu_bo_alloc_and_map_raw(device_handle, 4096, 4096,
+			AMDGPU_GEM_DOMAIN_GTT, 0, 0,
+							&ib_result_handle, &ib_result_cpu,
+							&ib_result_mc_address, &va_handle);
+	CU_ASSERT_EQUAL(r, 0);
+
+	r = amdgpu_get_bo_list(device_handle, ib_result_handle, NULL,
+				   &bo_list);
+	CU_ASSERT_EQUAL(r, 0);
+
+	ptr = ib_result_cpu;
+	i = 0;
+
+	ptr[i++] = PACKET3(PACKET3_WRITE_DATA, 3);
+	ptr[i++] = (reg_access ? WRITE_DATA_DST_SEL(0) : WRITE_DATA_DST_SEL(5))| WR_CONFIRM;
+	ptr[i++] = reg_access ? mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR : 0xdeadbee0;
+	ptr[i++] = 0;
+	ptr[i++] = 0xdeadbeef;
+
+	for (; i < 16; ++i)
+		ptr[i] = 0xffff1000;
+
+	memset(&ib_info, 0, sizeof(struct amdgpu_cs_ib_info));
+	ib_info.ib_mc_address = ib_result_mc_address;
+	ib_info.size = 16;
+
+	memset(&ibs_request, 0, sizeof(struct amdgpu_cs_request));
+	ibs_request.ip_type = AMDGPU_HW_IP_GFX;
+	ibs_request.ring = 0;
+	ibs_request.number_of_ibs = 1;
+	ibs_request.ibs = &ib_info;
+	ibs_request.resources = bo_list;
+	ibs_request.fence_info.handle = NULL;
+
+	r = amdgpu_cs_submit(context_handle, 0,&ibs_request, 1);
+	CU_ASSERT_EQUAL((r == 0 || r == -ECANCELED), 1);
+
+
+	memset(&fence_status, 0, sizeof(struct amdgpu_cs_fence));
+	fence_status.context = context_handle;
+	fence_status.ip_type = AMDGPU_HW_IP_GFX;
+	fence_status.ip_instance = 0;
+	fence_status.ring = 0;
+	fence_status.fence = ibs_request.seq_no;
+
+	r = amdgpu_cs_query_fence_status(&fence_status,
+			AMDGPU_TIMEOUT_INFINITE,0, &expired);
+	CU_ASSERT_EQUAL((r == 0 || r == -ECANCELED), 1);
+
+	r = amdgpu_bo_list_destroy(bo_list);
+	CU_ASSERT_EQUAL(r, 0);
+
+	r = amdgpu_bo_unmap_and_free(ib_result_handle, va_handle,
+					 ib_result_mc_address, 4096);
+	CU_ASSERT_EQUAL(r, 0);
+
+	r = amdgpu_cs_ctx_free(context_handle);
+	CU_ASSERT_EQUAL(r, 0);
+}
+
+static void amdgpu_illegal_reg_access()
+{
+	bad_access_helper(1);
+}
+
+static void amdgpu_illegal_mem_access()
+{
+	bad_access_helper(0);
+}
+
+static void amdgpu_dispatch_hang_gfx(void)
+{
+	amdgpu_dispatch_hang_helper(device_handle, AMDGPU_HW_IP_GFX);
+}
+
+static void amdgpu_dispatch_hang_compute(void)
+{
+	amdgpu_dispatch_hang_helper(device_handle, AMDGPU_HW_IP_COMPUTE);
+}
+
+static void amdgpu_dispatch_hang_slow_gfx(void)
+{
+	amdgpu_dispatch_hang_slow_helper(device_handle, AMDGPU_HW_IP_GFX);
+}
+
+static void amdgpu_dispatch_hang_slow_compute(void)
+{
+	amdgpu_dispatch_hang_slow_helper(device_handle, AMDGPU_HW_IP_COMPUTE);
+}
+
+static void amdgpu_draw_hang_gfx(void)
+{
+	int r;
+	struct drm_amdgpu_info_hw_ip info;
+	uint32_t ring_id;
+
+	r = amdgpu_query_hw_ip_info(device_handle, AMDGPU_HW_IP_GFX, 0, &info);
+	CU_ASSERT_EQUAL(r, 0);
+	if (!info.available_rings)
+		printf("SKIP ... as there's no graphic ring\n");
+
+	for (ring_id = 0; (1 << ring_id) & info.available_rings; ring_id++) {
+		amdgpu_memcpy_draw_test(device_handle, ring_id, 0);
+		amdgpu_memcpy_draw_test(device_handle, ring_id, 1);
+		amdgpu_memcpy_draw_test(device_handle, ring_id, 0);
+	}
+}
+
+static void amdgpu_draw_hang_slow_gfx(void)
+{
+	struct drm_amdgpu_info_hw_ip info;
+	uint32_t ring_id;
+	int r;
+
+	r = amdgpu_query_hw_ip_info(device_handle, AMDGPU_HW_IP_GFX, 0, &info);
+	CU_ASSERT_EQUAL(r, 0);
+
+	for (ring_id = 0; (1 << ring_id) & info.available_rings; ring_id++) {
+		amdgpu_memcpy_draw_test(device_handle, ring_id, 0);
+		amdgpu_memcpy_draw_hang_slow_test(device_handle, ring_id);
+		amdgpu_memcpy_draw_test(device_handle, ring_id, 0);
+	}
 }

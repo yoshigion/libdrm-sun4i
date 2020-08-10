@@ -24,7 +24,7 @@ libdrm_tegra = shared_library(
   include_directories : [inc_root, inc_drm],
   link_with : libdrm,
   dependencies : [dep_pthread_stubs, dep_atomic_ops],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   version : '0.0.0',
   install : true,
 )
@@ -46,8 +46,11 @@ pkg.generate(
 )
 
 test(
-  'tegra-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('tegra-symbol-check'), libdrm_tegra]
+  'tegra-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_tegra,
+    '--symbols-file', files('tegra-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

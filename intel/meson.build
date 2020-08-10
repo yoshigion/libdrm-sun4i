@@ -23,14 +23,14 @@ libdrm_intel = shared_library(
   [
     files(
       'intel_bufmgr.c', 'intel_bufmgr_fake.c', 'intel_bufmgr_gem.c',
-      'intel_decode.c', 'mm.c',
+      'intel_decode.c', 'mm.c', 'intel_chipset.c',
     ),
     config_file,
   ],
   include_directories : [inc_root, inc_drm],
   link_with : libdrm,
   dependencies : [dep_pciaccess, dep_pthread_stubs, dep_rt, dep_valgrind, dep_atomic_ops],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   version : '1.0.0',
   install : true,
 )
@@ -59,48 +59,46 @@ test_decode = executable(
   files('test_decode.c'),
   include_directories : [inc_root, inc_drm],
   link_with : [libdrm, libdrm_intel],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
 )
 
 test(
   'gen4-3d.batch',
-  prog_bash,
-  args : files('tests/gen4-3d.batch.sh'),
+  find_program('tests/gen4-3d.batch.sh'),
   workdir : meson.current_build_dir(),
 )
 test(
   'gen45-3d.batch',
-  prog_bash,
-  args : files('tests/gm45-3d.batch.sh'),
+  find_program('tests/gm45-3d.batch.sh'),
   workdir : meson.current_build_dir(),
 )
 test(
   'gen5-3d.batch',
-  prog_bash,
-  args : files('tests/gen5-3d.batch.sh'),
+  find_program('tests/gen5-3d.batch.sh'),
   workdir : meson.current_build_dir(),
 )
 test(
   'gen6-3d.batch',
-  prog_bash,
-  args : files('tests/gen6-3d.batch.sh'),
+  find_program('tests/gen6-3d.batch.sh'),
   workdir : meson.current_build_dir(),
 )
 test(
   'gen7-3d.batch',
-  prog_bash,
-  args : files('tests/gen7-3d.batch.sh'),
+  find_program('tests/gen7-3d.batch.sh'),
   workdir : meson.current_build_dir(),
 )
 test(
   'gen7-2d-copy.batch',
-  prog_bash,
-  args : files('tests/gen7-2d-copy.batch.sh'),
+  find_program('tests/gen7-2d-copy.batch.sh'),
   workdir : meson.current_build_dir(),
 )
+
 test(
-  'intel-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('intel-symbol-check'), libdrm_intel]
+  'intel-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_intel,
+    '--symbols-file', files('intel-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

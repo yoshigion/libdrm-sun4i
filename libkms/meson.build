@@ -44,7 +44,7 @@ endif
 libkms = shared_library(
   'kms',
   [files_libkms, config_file],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   include_directories : libkms_include,
   link_with : libdrm,
   version : '1.0.0',
@@ -68,8 +68,11 @@ pkg.generate(
 )
 
 test(
-  'kms-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('kms-symbol-check'), libkms]
+  'kms-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libkms,
+    '--symbols-file', files('kms-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

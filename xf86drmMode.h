@@ -41,6 +41,8 @@ extern "C" {
 #endif
 
 #include <drm.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /*
  * This is the interface for modesetting for drm.
@@ -49,12 +51,12 @@ extern "C" {
  * header defining uint32_t, int32_t and uint16_t.
  *
  * It aims to provide a randr1.2 compatible interface for modesettings in the
- * kernel, the interface is also ment to be used by libraries like EGL.
+ * kernel, the interface is also meant to be used by libraries like EGL.
  *
  * More information can be found in randrproto.txt which can be found here:
  * http://gitweb.freedesktop.org/?p=xorg/proto/randrproto.git
  *
- * There are some major diffrences to be noted. Unlike the randr1.2 proto you
+ * There are some major differences to be noted. Unlike the randr1.2 proto you
  * need to create the memory object of the framebuffer yourself with the ttm
  * buffer object interface. This object needs to be pinned.
  */
@@ -160,6 +162,7 @@ extern "C" {
 #define DRM_MODE_CONNECTOR_VIRTUAL      15
 #define DRM_MODE_CONNECTOR_DSI          16
 #define DRM_MODE_CONNECTOR_DPI          17
+#define DRM_MODE_CONNECTOR_WRITEBACK    18
 
 #define DRM_MODE_PROP_PENDING   (1<<0)
 #define DRM_MODE_PROP_RANGE     (1<<1)
@@ -222,6 +225,19 @@ typedef struct _drmModeFB {
 	/* driver specific handle */
 	uint32_t handle;
 } drmModeFB, *drmModeFBPtr;
+
+typedef struct _drmModeFB2 {
+	uint32_t fb_id;
+	uint32_t width, height;
+	uint32_t pixel_format; /* fourcc code from drm_fourcc.h */
+	uint64_t modifier; /* applies to all buffers */
+	uint32_t flags;
+
+	/* per-plane GEM handle; may be duplicate entries for multiple planes */
+	uint32_t handles[4];
+	uint32_t pitches[4]; /* bytes */
+	uint32_t offsets[4]; /* bytes */
+} drmModeFB2, *drmModeFB2Ptr;
 
 typedef struct drm_clip_rect drmModeClip, *drmModeClipPtr;
 
@@ -341,6 +357,7 @@ typedef struct _drmModePlaneRes {
 extern void drmModeFreeModeInfo( drmModeModeInfoPtr ptr );
 extern void drmModeFreeResources( drmModeResPtr ptr );
 extern void drmModeFreeFB( drmModeFBPtr ptr );
+extern void drmModeFreeFB2( drmModeFB2Ptr ptr );
 extern void drmModeFreeCrtc( drmModeCrtcPtr ptr );
 extern void drmModeFreeConnector( drmModeConnectorPtr ptr );
 extern void drmModeFreeEncoder( drmModeEncoderPtr ptr );
@@ -348,7 +365,7 @@ extern void drmModeFreePlane( drmModePlanePtr ptr );
 extern void drmModeFreePlaneResources(drmModePlaneResPtr ptr);
 
 /**
- * Retrives all of the resources associated with a card.
+ * Retrieves all of the resources associated with a card.
  */
 extern drmModeResPtr drmModeGetResources(int fd);
 
@@ -357,9 +374,10 @@ extern drmModeResPtr drmModeGetResources(int fd);
  */
 
 /**
- * Retrive information about framebuffer bufferId
+ * Retrieve information about framebuffer bufferId
  */
 extern drmModeFBPtr drmModeGetFB(int fd, uint32_t bufferId);
+extern drmModeFB2Ptr drmModeGetFB2(int fd, uint32_t bufferId);
 
 /**
  * Creates a new framebuffer with an buffer object as its scanout buffer.
@@ -397,7 +415,7 @@ extern int drmModeDirtyFB(int fd, uint32_t bufferId,
  */
 
 /**
- * Retrive information about the ctrt crtcId
+ * Retrieve information about the ctrt crtcId
  */
 extern drmModeCrtcPtr drmModeGetCrtc(int fd, uint32_t crtcId);
 

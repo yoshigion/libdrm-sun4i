@@ -30,7 +30,7 @@ libdrm_etnaviv = shared_library(
   ],
   include_directories : [inc_root, inc_drm],
   link_with : libdrm,
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   dependencies : [dep_pthread_stubs, dep_rt, dep_atomic_ops],
   version : '1.0.0',
   install : true,
@@ -53,7 +53,11 @@ ext_libdrm_etnaviv = declare_dependency(
 )
 
 test(
-  'etnaviv-symbol-check',
-  prog_bash,
-  args : [files('etnaviv-symbol-check'), libdrm_etnaviv]
+  'etnaviv-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_etnaviv,
+    '--symbols-file', files('etnaviv-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

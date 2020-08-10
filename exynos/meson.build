@@ -21,7 +21,7 @@
 libdrm_exynos = shared_library(
   'drm_exynos',
   [files('exynos_drm.c', 'exynos_fimg2d.c'), config_file],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   include_directories : [inc_root, inc_drm],
   link_with : libdrm,
   dependencies : [dep_pthread_stubs],
@@ -47,8 +47,11 @@ pkg.generate(
 )
 
 test(
-  'exynos-symbol-check',
-  prog_bash,
-  env : env_test,
-  args : [files('exynos-symbol-check'), libdrm_exynos]
+  'exynos-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm_exynos,
+    '--symbols-file', files('exynos-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )

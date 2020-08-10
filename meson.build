@@ -21,7 +21,7 @@
 project(
   'libdrm',
   ['c'],
-  version : '2.4.91',
+  version : '2.4.102',
   license : 'MIT',
   meson_version : '>= 0.43',
   default_options : ['buildtype=debugoptimized', 'c_std=gnu99'],
@@ -44,14 +44,18 @@ dep_threads = dependency('threads')
 
 cc = meson.get_compiler('c')
 
+symbols_check = find_program('symbols-check.py')
+prog_nm = find_program('nm')
+
 # Check for atomics
 intel_atomics = false
 lib_atomics = false
 
 dep_atomic_ops = dependency('atomic_ops', required : false)
-if cc.compiles('''
+if cc.links('''
     int atomic_add(int *i) { return __sync_add_and_fetch (i, 1); }
     int atomic_cmpxchg(int *i, int j, int k) { return __sync_val_compare_and_swap (i, j, k); }
+    int main() { }
     ''',
     name : 'Intel Atomics')
   intel_atomics = true
@@ -157,7 +161,7 @@ if _vc4 != 'false'
   with_vc4 = _vc4 == 'true' or ['arm', 'aarch64'].contains(host_machine.cpu_family())
 endif
 
-# XXX: Aparently only freebsd and dragonfly bsd actually need this (and
+# XXX: Apparently only freebsd and dragonfly bsd actually need this (and
 # gnu/kfreebsd), not openbsd and netbsd
 with_libkms = false
 _libkms = get_option('libkms')
@@ -179,20 +183,38 @@ else
   dep_rt = []
 endif
 dep_m = cc.find_library('m', required : false)
-foreach header : ['sys/sysctl.h', 'sys/select.h', 'alloca.h']
-  config.set('HAVE_' + header.underscorify().to_upper(),
+
+# The header is not required on Linux, and is in fact deprecated in glibc 2.30+
+if ['linux'].contains(host_machine.system())
+  config.set10('HAVE_SYS_SYSCTL_H', false)
+else
+  # From Niclas Zeising:
+  # FreeBSD requires sys/types.h for sys/sysctl.h, so add it as part of
+  # the includes when checking for headers.
+  config.set10('HAVE_SYS_SYSCTL_H',
+    cc.compiles('#include <sys/types.h>\n#include <sys/sysctl.h>', name : 'sys/sysctl.h works'))
+endif
+
+foreach header : ['sys/select.h', 'alloca.h']
+  config.set10('HAVE_' + header.underscorify().to_upper(),
     cc.compiles('#include <@0@>'.format(header), name : '@0@ works'.format(header)))
 endforeach
-if cc.has_header_symbol('sys/sysmacros.h', 'major')
+
+if (cc.has_header_symbol('sys/sysmacros.h', 'major') and
+  cc.has_header_symbol('sys/sysmacros.h', 'minor') and
+  cc.has_header_symbol('sys/sysmacros.h', 'makedev'))
   config.set10('MAJOR_IN_SYSMACROS', true)
-elif cc.has_header_symbol('sys/mkdev.h', 'major')
+endif
+if (cc.has_header_symbol('sys/mkdev.h', 'major') and
+  cc.has_header_symbol('sys/mkdev.h', 'minor') and
+  cc.has_header_symbol('sys/mkdev.h', 'makedev'))
   config.set10('MAJOR_IN_MKDEV', true)
 endif
 config.set10('HAVE_OPEN_MEMSTREAM', cc.has_function('open_memstream'))
 
 warn_c_args = []
 foreach a : ['-Wall', '-Wextra', '-Wsign-compare', '-Werror=undef',
-             '-Werror-implicit-function-declaration', '-Wpointer-arith',
+             '-Werror=implicit-function-declaration', '-Wpointer-arith',
              '-Wwrite-strings', '-Wstrict-prototypes', '-Wmissing-prototypes',
              '-Wmissing-declarations', '-Wnested-externs', '-Wpacked',
              '-Wswitch-enum', '-Wmissing-format-attribute',
@@ -211,6 +233,9 @@ foreach a : ['unused-parameter', 'attributes', 'long-long',
   endif
 endforeach
 
+# all c args:
+libdrm_c_args = warn_c_args + ['-fvisibility=hidden']
+
 
 dep_pciaccess = dependency('pciaccess', version : '>= 0.10', required : with_intel)
 dep_cunit = dependency('cunit', version : '>= 2.1', required : false)
@@ -224,7 +249,11 @@ else
 endif
 _valgrind = get_option('valgrind')
 if _valgrind != 'false'
-  dep_valgrind = dependency('valgrind', required : _valgrind == 'true')
+  if with_freedreno
+    dep_valgrind = dependency('valgrind', required : _valgrind == 'true', version : '>=3.10.0')
+  else
+    dep_valgrind = dependency('valgrind', required : _valgrind == 'true')
+  endif
   with_valgrind = dep_valgrind.found()
 else
   dep_valgrind = []
@@ -244,9 +273,6 @@ if prog_xslt.found()
   endif
 endif
 with_man_pages = with_man_pages != 'false' and prog_xslt.found() and prog_sed.found()
-
-# Used for tets
-prog_bash = find_program('bash')
 
 config.set10('HAVE_VISIBILITY',
   cc.compiles('''int foo_hidden(void) __attribute__((visibility(("hidden"))));''',
@@ -273,7 +299,7 @@ config_file = configure_file(
   configuration : config,
   output : 'config.h',
 )
-add_project_arguments('-include', 'config.h', language : 'c')
+add_project_arguments('-include', '@0@'.format(config_file), language : 'c')
 
 inc_root = include_directories('.')
 inc_drm = include_directories('include/drm')
@@ -286,11 +312,21 @@ libdrm = shared_library(
    ),
    config_file,
   ],
-  c_args : warn_c_args,
+  c_args : libdrm_c_args,
   dependencies : [dep_valgrind, dep_rt, dep_m],
   include_directories : inc_drm,
   version : '2.4.0',
   install : true,
+)
+
+test(
+  'core-symbols-check',
+  symbols_check,
+  args : [
+    '--lib', libdrm,
+    '--symbols-file', files('core-symbols.txt'),
+    '--nm', prog_nm.path(),
+  ],
 )
 
 ext_libdrm = declare_dependency(
@@ -303,10 +339,11 @@ install_headers(
   'include/drm/drm.h', 'include/drm/drm_fourcc.h', 'include/drm/drm_mode.h',
   'include/drm/drm_sarea.h', 'include/drm/i915_drm.h',
   'include/drm/mach64_drm.h', 'include/drm/mga_drm.h',
-  'include/drm/nouveau_drm.h', 'include/drm/qxl_drm.h',
-  'include/drm/r128_drm.h', 'include/drm/radeon_drm.h',
-  'include/drm/amdgpu_drm.h', 'include/drm/savage_drm.h',
-  'include/drm/sis_drm.h', 'include/drm/tegra_drm.h', 'include/drm/vc4_drm.h',
+  'include/drm/msm_drm.h', 'include/drm/nouveau_drm.h',
+  'include/drm/qxl_drm.h', 'include/drm/r128_drm.h',
+  'include/drm/radeon_drm.h', 'include/drm/amdgpu_drm.h',
+  'include/drm/savage_drm.h', 'include/drm/sis_drm.h',
+  'include/drm/tegra_drm.h', 'include/drm/vc4_drm.h',
   'include/drm/via_drm.h', 'include/drm/virtgpu_drm.h',
   subdir : 'libdrm',
 )
@@ -321,9 +358,6 @@ pkg.generate(
   version : meson.project_version(),
   description : 'Userspace interface to kernel DRM services',
 )
-
-env_test = environment()
-env_test.set('NM', find_program('nm').path())
 
 if with_libkms
   subdir('libkms')
